@@ -1,0 +1,334 @@
+#!/bin/bash
+# typist — high-level workflow wrapper for the serial_typist daemon.
+#
+# Compresses the four-command workflow (load daemon / record_on / start /
+# stop+record_off+unload) into one or two:
+#
+#   typist begin --record    # start a video-recorded session
+#   typist end               # stop it
+#
+# Plus inspection helpers (status / sessions / log).
+#
+# Install:
+#   chmod +x ~/skape/serial_typist/typist
+#   sudo ln -sf ~/skape/serial_typist/typist /usr/local/bin/typist
+
+set -e
+
+PROJECT_DIR="$HOME/skape/serial_typist"
+PLIST_LABEL="com.serialtypist.daemon"
+PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
+DATA_DIR="$HOME/serial_typist"
+COMMANDS_FILE="$DATA_DIR/commands.jsonl"
+STATE_FILE="$DATA_DIR/daemon.state"
+LOG_FILE="$DATA_DIR/daemon.log"
+SESSIONS_DIR="$DATA_DIR/sessions"
+
+# ---------- helpers ----------
+# Loaded = registered with launchd. Running = actually has a live PID.
+# These differ because the plist has RunAtLoad=false; load merely registers.
+daemon_loaded() {
+    launchctl list 2>/dev/null | grep -q "$PLIST_LABEL"
+}
+
+daemon_pid() {
+    launchctl list 2>/dev/null | awk -v label="$PLIST_LABEL" '$3 == label {print $1}'
+}
+
+daemon_running() {
+    local pid
+    pid="$(daemon_pid)"
+    [[ -n "$pid" && "$pid" != "-" ]]
+}
+
+# True when the state file's mtime is at least as recent as the timestamp
+# passed in (epoch seconds). Used to wait for the daemon's first state-write
+# tick after start, so we don't trust a stale file from a previous run.
+state_file_fresh_since() {
+    local since="$1"
+    [[ -f "$STATE_FILE" ]] || return 1
+    local mtime
+    mtime=$(stat -f %m "$STATE_FILE" 2>/dev/null || echo 0)
+    (( mtime >= since ))
+}
+
+require_plist() {
+    if [[ ! -f "$PLIST_PATH" ]]; then
+        echo "Error: launchd plist not installed at $PLIST_PATH"
+        echo "Install with:"
+        echo "  cp $PROJECT_DIR/${PLIST_LABEL}.plist ~/Library/LaunchAgents/"
+        exit 1
+    fi
+}
+
+send_cmd() {
+    mkdir -p "$DATA_DIR"
+    echo "$1" >> "$COMMANDS_FILE"
+}
+
+# Read a JSON field from the state file. Falls back to empty string.
+state_field() {
+    local field="$1"
+    [[ -f "$STATE_FILE" ]] || { echo ""; return; }
+    python3 -c "import json,sys
+try:
+    s=json.load(open('$STATE_FILE'))
+    v=s.get('$field')
+    if v is None: print('')
+    elif isinstance(v,bool): print('true' if v else 'false')
+    else: print(v)
+except: print('')" 2>/dev/null
+}
+
+# ---------- commands ----------
+cmd_begin() {
+    local record=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --record|-r) record=true; shift ;;
+            -h|--help)
+                echo "Usage: typist begin [--record]"
+                echo "  --record    enable video capture for this session"
+                return 0 ;;
+            *) echo "Unknown option: $1"; exit 2 ;;
+        esac
+    done
+
+    require_plist
+
+    # Two distinct steps: register the plist (if not already), and start the
+    # daemon process (if not already running). With RunAtLoad=false, the load
+    # alone is not sufficient.
+    if ! daemon_loaded; then
+        echo "Daemon not registered. Loading plist..."
+        launchctl load "$PLIST_PATH"
+        sleep 0.3
+    fi
+
+    if ! daemon_running; then
+        # Capture timestamp BEFORE start so we can verify the daemon's first
+        # state-write tick happened after this point (not yesterday's frozen file).
+        local start_t
+        start_t=$(date +%s)
+        echo "Starting daemon..."
+        launchctl start "$PLIST_LABEL"
+
+        # Wait up to 8s for the daemon to come up AND write a fresh state file.
+        local up=false
+        for _ in 1 2 3 4 5 6 7 8; do
+            sleep 1
+            if daemon_running && state_file_fresh_since "$start_t"; then
+                up=true
+                break
+            fi
+        done
+        if ! $up; then
+            echo "Error: daemon failed to start within 8s."
+            echo "  Check: tail $LOG_FILE"
+            echo "  Check: cat $DATA_DIR/launchd.stderr.log"
+            exit 1
+        fi
+    fi
+
+    # Refuse to begin if a session is already running. We're now reading from
+    # a state file that's guaranteed to be from this daemon's lifetime.
+    local current_state
+    current_state="$(state_field state)"
+    if [[ "$current_state" == "ACTIVE" ]]; then
+        echo "Session already running: $(state_field session_id)"
+        echo "Use 'typist end' first."
+        exit 0
+    fi
+
+    if $record; then
+        send_cmd '{"action": "record_on"}'
+        sleep 0.4
+    fi
+
+    # Capture mtime of state file before sending start command.
+    # Daemon writes state immediately after processing each command, so we
+    # wait for mtime to advance instead of guessing a fixed sleep.
+    local pre_start_mtime
+    pre_start_mtime=$(stat -f %m "$STATE_FILE" 2>/dev/null || echo 0)
+    send_cmd '{"action": "start"}'
+
+    # Wait up to 5s for daemon to process the start command (state file mtime
+    # advances when the daemon writes state, which it does after each command).
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.5
+        local cur_mtime
+        cur_mtime=$(stat -f %m "$STATE_FILE" 2>/dev/null || echo 0)
+        if (( cur_mtime > pre_start_mtime )); then
+            break
+        fi
+    done
+
+    local sid rec st
+    sid="$(state_field session_id)"
+    rec="$(state_field recording_active)"
+    st="$(state_field state)"
+
+    if [[ "$st" == "ACTIVE" && -n "$sid" ]]; then
+        echo "Session started: $sid"
+        if [[ "$rec" == "true" ]]; then
+            echo "Video recording: ON"
+        else
+            echo "Video recording: OFF"
+        fi
+    else
+        echo "Session start may have failed (state=$st)."
+        echo "Check $LOG_FILE."
+        exit 1
+    fi
+}
+
+cmd_end() {
+    local shutdown=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --shutdown|-s) shutdown=true; shift ;;
+            -h|--help)
+                echo "Usage: typist end [--shutdown]"
+                echo "  --shutdown   also unload the daemon entirely"
+                return 0 ;;
+            *) echo "Unknown option: $1"; exit 2 ;;
+        esac
+    done
+
+    if ! daemon_running; then
+        echo "Daemon not running (no live process). Nothing to end."
+        if daemon_loaded; then
+            echo "  (plist is registered but daemon is not active. "
+            echo "   Use 'typist begin' to start it, or unload the plist if you're done.)"
+        fi
+        return 0
+    fi
+
+    local current_state sid
+    current_state="$(state_field state)"
+    sid="$(state_field session_id)"
+
+    if [[ "$current_state" != "ACTIVE" ]]; then
+        echo "No active session (state=$current_state)."
+    else
+        send_cmd '{"action": "stop"}'
+        send_cmd '{"action": "record_off"}'
+        sleep 1
+        echo "Session ended: $sid"
+        echo "Analysis pipeline running in background."
+        echo "  Check ~30s from now: tail -f $LOG_FILE"
+    fi
+
+    if $shutdown; then
+        sleep 2  # let the stop command propagate
+        echo "Unloading daemon..."
+        launchctl unload "$PLIST_PATH"
+        echo "Daemon stopped."
+    fi
+}
+
+cmd_status() {
+    if ! daemon_loaded; then
+        echo "Daemon: NOT REGISTERED with launchd"
+        echo "  Start with: typist begin"
+        return 0
+    fi
+    if ! daemon_running; then
+        echo "Daemon: registered but NOT RUNNING (no live process)"
+        echo "  Start with: typist begin"
+        return 0
+    fi
+    echo "Daemon: running (PID $(daemon_pid))"
+    if [[ -f "$STATE_FILE" ]]; then
+        python3 -c "
+import json
+s = json.load(open('$STATE_FILE'))
+print(f\"State:     {s['state']}\")
+if s['session_id']:
+    print(f\"Session:   {s['session_id']}\")
+    print(f\"  presses: {s['session_press_count']}  letters: {s['session_letter_count']}\")
+    print(f\"  age:     {s['session_age_seconds']:.1f}s\")
+    if s['idle_seconds'] is not None:
+        print(f\"  idle:    {s['idle_seconds']:.1f}s since last keystroke\")
+print(f\"Recording: {'ON' if s['recording_active'] else 'OFF'}\")
+print(f\"Video sub: {'running' if s['video_subprocess_running'] else 'not running'}\")
+print(f\"Updated:   {s['updated_at']}\")"
+    fi
+}
+
+cmd_sessions() {
+    [[ -d "$SESSIONS_DIR" ]] || { echo "No sessions directory yet."; return 0; }
+
+    echo "Recent sessions in $SESSIONS_DIR:"
+    echo ""
+    printf "  %-22s  %-22s  %s\n" "session_id" "status" "letters"
+    printf "  %-22s  %-22s  %s\n" "----------" "------" "-------"
+    local count=0
+    for s in $(ls -t "$SESSIONS_DIR" 2>/dev/null); do
+        local sd="$SESSIONS_DIR/$s"
+        [[ -d "$sd" ]] || continue
+        local status="(in progress?)"
+        if [[ -f "$sd/DISCARDED.txt" ]]; then
+            status="DISCARDED"
+        elif [[ -f "$sd/landmarks.csv" ]]; then
+            status="biomechanical (full)"
+        elif [[ -f "$sd/report.md" ]]; then
+            status="keystroke-only"
+        fi
+        local letters="?"
+        if [[ -f "$sd/metadata.json" ]]; then
+            letters="$(python3 -c "import json
+m=json.load(open('$sd/metadata.json'))
+print(m.get('letter_press_count', m.get('press_count', '?')))" 2>/dev/null || echo '?')"
+        fi
+        printf "  %-22s  %-22s  %s\n" "$s" "$status" "$letters"
+        count=$((count + 1))
+        [[ $count -ge 12 ]] && break
+    done
+    if [[ $count -eq 0 ]]; then
+        echo "  (none yet)"
+    fi
+}
+
+cmd_log() {
+    local n="${1:-30}"
+    [[ -f "$LOG_FILE" ]] || { echo "No log file yet at $LOG_FILE"; return 0; }
+    tail -n "$n" "$LOG_FILE"
+}
+
+cmd_help() {
+    cat <<EOF
+typist — high-level wrapper for the serial_typist daemon
+
+USAGE
+  typist begin [--record]    Load daemon if needed, optionally enable video,
+                             start a session.
+  typist end [--shutdown]    Stop the current session. Pipeline runs async.
+                             --shutdown also unloads the daemon.
+  typist status              Daemon + session state at a glance.
+  typist sessions            Recent sessions with status.
+  typist log [N]             Last N log lines (default 30).
+  typist help                This message.
+
+PATHS
+  Project:    $PROJECT_DIR
+  Sessions:   $SESSIONS_DIR
+  Log:        $LOG_FILE
+
+EXAMPLES
+  typist begin --record      # start a video-recorded session
+  typist end                 # stop it, leave daemon running for next session
+  typist end --shutdown      # stop and unload daemon (done for the day)
+EOF
+}
+
+# ---------- dispatch ----------
+case "${1:-help}" in
+    begin)    shift; cmd_begin "$@" ;;
+    end)      shift; cmd_end "$@" ;;
+    status)   shift; cmd_status ;;
+    sessions) shift; cmd_sessions ;;
+    log)      shift; cmd_log "$@" ;;
+    help|-h|--help|"") cmd_help ;;
+    *) echo "Unknown command: $1"; echo ""; cmd_help; exit 2 ;;
+esac

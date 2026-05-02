@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------
+# Credentials & secrets — never commit
+# ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# launchd plist contains EnvironmentVariables (Gmail credentials),
+# so the local copy is kept out of version control. To distribute
+# the project, replace with a sanitized template.
+com.serialtypist.daemon.plist
+
+# ---------------------------------------------------------------
+# Python venv & caches
+# ---------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------------------------------------------------------------
+# Editor / IDE
+# ---------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ---------------------------------------------------------------
+# macOS
+# ---------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ---------------------------------------------------------------
+# Project artifacts that don't belong in version control
+# ---------------------------------------------------------------
+# Captured session data — large binary video, derived analyses
+sessions/
+fuse_testing/sessions/
+testing_scripts/sessions/
+
+# Temporary debug renders
+events_v2_debug/
+events_v2_1_debug/
+events_debug/
+
+# Aggregator outputs (regenerated from sessions on demand)
+aggregated_*/
+
+# Monkeytype API cache
+monkeytype_cache/
