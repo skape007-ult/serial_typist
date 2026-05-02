@@ -6,7 +6,7 @@ More intricately, the program taps into a stream from my phone that has been rig
 
 *Motivations:* For the past half-year, I have been quite a consistent fan of the typing website [*monkeytype.com*](http://monkeytype.com) and I noticed how, even after daily efforts, my typing speeds were starting to plateau. Initially, I used to practice two-fingered typing but with this revelation, I began to look closer into how I pressed each key. Slowly, I transitioned into using all the fingers for their right keys, which led to my speed taking a nosedive. 
 
-![][  
+![[Monkeytype WPM over time](assets/typing_graph.png) 
 *(The fall is where I started to practice touch-typing)*
 
 After analysing some other biomechanical movements, I thought I could utilise a pipeline that fused my inputs with a video recording to get a deeper analysis into my typing mechanisms and so, this project was born. 
