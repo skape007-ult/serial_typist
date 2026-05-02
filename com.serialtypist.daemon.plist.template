@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+        "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.serialtypist.daemon</string>
+
+    <!--
+      ProgramArguments: absolute paths to the venv's python and the daemon
+      script. Update these if you move the project. The daemon's own logging
+      goes to ~/serial_typist/daemon.log, so stdout/stderr below are mostly
+      a backup — they catch interpreter-level crashes that occur before
+      logging is set up.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/YOUR/HOME/DIR/skape/serial_typist/.venv/bin/python</string>
+        <string>/YOUR/HOME/DIR/skape/serial_typist/typist_daemon.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/YOUR/HOME/DIR/skape/serial_typist</string>
+
+    <!--
+      Daemon is MANUAL-START only.
+      Load with: launchctl load ~/Library/LaunchAgents/com.serialtypist.daemon.plist
+      Unload with: launchctl unload ~/Library/LaunchAgents/com.serialtypist.daemon.plist
+      RunAtLoad=false → does NOT start at login. Daemon only runs when explicitly loaded.
+      KeepAlive=false → if you stop the daemon, it stays stopped (no auto-restart).
+    -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Don't restart faster than every 10 seconds (prevents fork-bomb on persistent crash) -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!--
+      Backstop logs for early-startup failures.
+      The daemon's normal logging is at ~/serial_typist/daemon.log.
+      These two files capture anything that crashes before logging starts
+      (e.g., bad imports, missing venv).
+    -->
+    <key>StandardOutPath</key>
+    <string>/YOUR/HOME/DIR/serial_typist/launchd.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/YOUR/HOME/DIR/serial_typist/launchd.stderr.log</string>
+
+    <!--
+      Inherit the user's PATH so subprocess calls (capture_p1.py, ffmpeg if
+      ever needed, etc.) can find their executables.
+      Credentials are loaded from your .env file at runtime — do NOT put real
+      values here. Copy this file to com.serialtypist.daemon.plist, fill in
+      your actual values, then install to ~/Library/LaunchAgents/.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>GMAIL_ADDRESS</key>
+        <string>YOUR_GMAIL_ADDRESS_HERE</string>
+        <key>GMAIL_APP_PASSWORD</key>
+        <string>YOUR_GMAIL_APP_PASSWORD_HERE</string>
+        <key>EMAIL_RECIPIENT</key>
+        <string>YOUR_EMAIL_RECIPIENT_HERE</string>
+    </dict>
+
+    <!--
+      ProcessType: Interactive lets the daemon receive normal user-session
+      resources (necessary for pynput's IOKit access on macOS).
+    -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
